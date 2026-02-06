@@ -1,0 +1,131 @@
+# ============================================================
+# Helm Chart Default Values
+# Override these per environment (dev, staging, prod).
+# ============================================================
+
+# Global settings
+global:
+  namespace: dev
+  imageRegistry: "asylums"
+  imageTag: "latest"
+
+# Frontend
+frontend:
+  replicas: 2
+  image: asylums/frontend
+  port: 80
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# User Service
+userService:
+  replicas: 2
+  image: asylums/user-service
+  port: 3001
+  dbName: users_db
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# Product Service
+productService:
+  replicas: 2
+  image: asylums/product-service
+  port: 3002
+  dbName: products_db
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# Order Service
+orderService:
+  replicas: 2
+  image: asylums/order-service
+  port: 8001
+  dbName: orders_db
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# Payment Service
+paymentService:
+  replicas: 2
+  image: asylums/payment-service
+  port: 8002
+  dbName: payments_db
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# PostgreSQL
+postgres:
+  image: postgres:15-alpine
+  storage: 5Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Redis
+redis:
+  image: redis:7-alpine
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# RabbitMQ
+rabbitmq:
+  image: rabbitmq:3.12-management-alpine
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Secrets
+secrets:
+  dbUser: postgres
+  dbPassword: postgres
+  dbName: ecommerce_db
+  jwtSecret: change-me-in-production-use-long-random-string
+
+# Ingress
+ingress:
+  enabled: true
+  className: nginx
+
+# HPA
+hpa:
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPU: 70
