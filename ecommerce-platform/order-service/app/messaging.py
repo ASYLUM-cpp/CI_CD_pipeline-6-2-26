@@ -25,7 +25,6 @@ async def connect_rabbitmq():
 
 async def publish_message(routing_key: str, data: dict):
     """Publish a JSON message to the topic exchange."""
-    global _channel
     if not _channel:
         print("⚠️  RabbitMQ channel not ready, skipping publish")
         return
@@ -43,6 +42,5 @@ async def publish_message(routing_key: str, data: dict):
 
 async def close_rabbitmq():
     """Close RabbitMQ connection gracefully."""
-    global _connection
     if _connection:
         await _connection.close()

@@ -23,7 +23,6 @@ async def connect_rabbitmq():
 
 
 async def publish_message(routing_key: str, data: dict):
-    global _channel
     if not _channel:
         return
     try:
@@ -38,6 +37,5 @@ async def publish_message(routing_key: str, data: dict):
 
 
 async def close_rabbitmq():
-    global _connection
     if _connection:
         await _connection.close()
