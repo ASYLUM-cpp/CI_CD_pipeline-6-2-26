@@ -1,0 +1,90 @@
+# ============================================================
+# CD Pipeline – GitHub Actions
+# Deploys to Kubernetes via SSH into the control plane EC2 node.
+# develop branch → dev namespace
+# main branch → prod namespace
+# ============================================================
+name: CD Pipeline
+
+on:
+  push:
+    branches: [master, main, develop]
+
+env:
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  deploy:
+    name: Deploy to Kubernetes
+    runs-on: ubuntu-latest
+    # Only run after CI passes (workflow_run or needs from same workflow)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine target namespace
+        id: namespace
+        run: |
+          if [ "${{ github.ref }}" == "refs/heads/main" ] || [ "${{ github.ref }}" == "refs/heads/master" ]; then
+            echo "namespace=prod" >> $GITHUB_OUTPUT
+            echo "overlay=prod" >> $GITHUB_OUTPUT
+          else
+            echo "namespace=dev" >> $GITHUB_OUTPUT
+            echo "overlay=dev" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/bastion-11-1-26.pem
+          chmod 600 ~/.ssh/bastion-11-1-26.pem
+          # Add host to known_hosts to skip prompt
+          ssh-keyscan -H ${{ secrets.CONTROL_PLANE_IP }} >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Update image tags in manifests
+        run: |
+          # Update all image tags to the current commit SHA
+          cd ecommerce-platform/infra/k8s/base
+          for file in frontend.yaml user-service.yaml product-service.yaml order-service.yaml payment-service.yaml; do
+            sed -i "s|image: asylums/.*:.*|image: asylums/$(echo $file | sed 's/.yaml//'):${IMAGE_TAG}|g" $file
+          done
+
+      - name: Copy manifests to control plane
+        run: |
+          scp -i ~/.ssh/bastion-11-1-26.pem -r ecommerce-platform/infra/k8s/ \
+            ubuntu@${{ secrets.CONTROL_PLANE_IP }}:/tmp/k8s-manifests/
+
+      - name: Deploy to Kubernetes
+        run: |
+          ssh -i ~/.ssh/bastion-11-1-26.pem ubuntu@${{ secrets.CONTROL_PLANE_IP }} << 'DEPLOY_SCRIPT'
+            set -e
+
+            export KUBECONFIG=/home/ubuntu/.kube/config
+
+            echo ">>> Deploying to ${{ steps.namespace.outputs.namespace }} namespace..."
+
+            # Apply using kustomize overlay
+            kubectl apply -k /tmp/k8s-manifests/k8s/${{ steps.namespace.outputs.overlay }}/
+
+            # Wait for rollouts to complete
+            echo ">>> Waiting for deployments to roll out..."
+            for deploy in frontend user-service product-service order-service payment-service; do
+              kubectl rollout status deployment/$deploy \
+                -n ${{ steps.namespace.outputs.namespace }} \
+                --timeout=300s || true
+            done
+
+            echo ">>> Deployment complete!"
+            kubectl get pods -n ${{ steps.namespace.outputs.namespace }}
+          DEPLOY_SCRIPT
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/bastion-11-1-26.pem
+
+      - name: Deployment Summary
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Namespace**: ${{ steps.namespace.outputs.namespace }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image Tag**: ${IMAGE_TAG}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY

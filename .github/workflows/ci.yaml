@@ -1,0 +1,190 @@
+# ============================================================
+# CI Pipeline – GitHub Actions
+# Runs on every push and pull request.
+# Lints, tests, builds Docker images, and pushes to registry.
+# ============================================================
+name: CI Pipeline
+
+on:
+  push:
+    branches: [master, main, develop]
+  pull_request:
+    branches: [master, main, develop]
+
+env:
+  DOCKER_REGISTRY: docker.io
+  DOCKER_USERNAME: asylums
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  # ---- Lint & Test: Frontend ----
+  frontend:
+    name: Frontend CI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ecommerce-platform/frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: ecommerce-platform/frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Lint
+        run: npm run lint --if-present
+
+      - name: Test
+        run: npm test -- --watchAll=false --passWithNoTests
+
+      - name: Build
+        run: npm run build
+
+  # ---- Lint & Test: User Service ----
+  user-service:
+    name: User Service CI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ecommerce-platform/user-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: ecommerce-platform/user-service/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Lint
+        run: npm run lint --if-present
+
+      - name: Test
+        run: npm test -- --passWithNoTests
+
+  # ---- Lint & Test: Product Service ----
+  product-service:
+    name: Product Service CI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ecommerce-platform/product-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: ecommerce-platform/product-service/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Lint
+        run: npm run lint --if-present
+
+      - name: Test
+        run: npm test -- --passWithNoTests
+
+  # ---- Lint & Test: Order Service ----
+  order-service:
+    name: Order Service CI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ecommerce-platform/order-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install flake8
+
+      - name: Lint
+        run: flake8 app/ --max-line-length=120 --ignore=E501
+
+      - name: Test
+        run: pytest tests/ -v
+
+  # ---- Lint & Test: Payment Service ----
+  payment-service:
+    name: Payment Service CI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ecommerce-platform/payment-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install flake8
+
+      - name: Lint
+        run: flake8 app/ --max-line-length=120 --ignore=E501
+
+      - name: Test
+        run: pytest tests/ -v
+
+  # ---- Build & Push Docker Images ----
+  build-and-push:
+    name: Build & Push Docker Images
+    runs-on: ubuntu-latest
+    needs: [frontend, user-service, product-service, order-service, payment-service]
+    if: github.event_name == 'push'
+    strategy:
+      matrix:
+        service:
+          - { name: frontend, context: ecommerce-platform/frontend }
+          - { name: user-service, context: ecommerce-platform/user-service }
+          - { name: product-service, context: ecommerce-platform/product-service }
+          - { name: order-service, context: ecommerce-platform/order-service }
+          - { name: payment-service, context: ecommerce-platform/payment-service }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: asylums
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.service.context }}
+          push: true
+          tags: |
+            asylums/${{ matrix.service.name }}:${{ github.sha }}
+            asylums/${{ matrix.service.name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
