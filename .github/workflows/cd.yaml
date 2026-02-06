@@ -17,7 +17,7 @@ jobs:
   deploy:
     name: Deploy to Kubernetes
     runs-on: ubuntu-latest
-    # Only run after CI passes (workflow_run or needs from same workflow)
+    if: ${{ secrets.CONTROL_PLANE_IP != '' && secrets.EC2_SSH_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
 
