@@ -17,11 +17,24 @@ jobs:
   deploy:
     name: Deploy to Kubernetes
     runs-on: ubuntu-latest
-    if: ${{ secrets.CONTROL_PLANE_IP != '' && secrets.EC2_SSH_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check if deploy secrets are configured
+        id: check
+        run: |
+          if [ -z "$CONTROL_PLANE_IP" ] || [ -z "$SSH_KEY" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "::warning::Skipping deploy — CONTROL_PLANE_IP or EC2_SSH_KEY secrets not set"
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          CONTROL_PLANE_IP: ${{ secrets.CONTROL_PLANE_IP }}
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+
       - name: Determine target namespace
+        if: steps.check.outputs.skip != 'true'
         id: namespace
         run: |
           if [ "${{ github.ref }}" == "refs/heads/main" ] || [ "${{ github.ref }}" == "refs/heads/master" ]; then
@@ -33,55 +46,51 @@ jobs:
           fi
 
       - name: Setup SSH Key
+        if: steps.check.outputs.skip != 'true'
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/bastion-11-1-26.pem
           chmod 600 ~/.ssh/bastion-11-1-26.pem
-          # Add host to known_hosts to skip prompt
           ssh-keyscan -H ${{ secrets.CONTROL_PLANE_IP }} >> ~/.ssh/known_hosts 2>/dev/null || true
 
       - name: Update image tags in manifests
+        if: steps.check.outputs.skip != 'true'
         run: |
-          # Update all image tags to the current commit SHA
           cd ecommerce-platform/infra/k8s/base
           for file in frontend.yaml user-service.yaml product-service.yaml order-service.yaml payment-service.yaml; do
             sed -i "s|image: asylums/.*:.*|image: asylums/$(echo $file | sed 's/.yaml//'):${IMAGE_TAG}|g" $file
           done
 
       - name: Copy manifests to control plane
+        if: steps.check.outputs.skip != 'true'
         run: |
           scp -i ~/.ssh/bastion-11-1-26.pem -r ecommerce-platform/infra/k8s/ \
             ubuntu@${{ secrets.CONTROL_PLANE_IP }}:/tmp/k8s-manifests/
 
       - name: Deploy to Kubernetes
+        if: steps.check.outputs.skip != 'true'
         run: |
           ssh -i ~/.ssh/bastion-11-1-26.pem ubuntu@${{ secrets.CONTROL_PLANE_IP }} << 'DEPLOY_SCRIPT'
             set -e
-
             export KUBECONFIG=/home/ubuntu/.kube/config
-
             echo ">>> Deploying to ${{ steps.namespace.outputs.namespace }} namespace..."
-
-            # Apply using kustomize overlay
             kubectl apply -k /tmp/k8s-manifests/k8s/${{ steps.namespace.outputs.overlay }}/
-
-            # Wait for rollouts to complete
             echo ">>> Waiting for deployments to roll out..."
             for deploy in frontend user-service product-service order-service payment-service; do
               kubectl rollout status deployment/$deploy \
                 -n ${{ steps.namespace.outputs.namespace }} \
                 --timeout=300s || true
             done
-
             echo ">>> Deployment complete!"
             kubectl get pods -n ${{ steps.namespace.outputs.namespace }}
           DEPLOY_SCRIPT
 
       - name: Cleanup SSH key
-        if: always()
+        if: always() && steps.check.outputs.skip != 'true'
         run: rm -f ~/.ssh/bastion-11-1-26.pem
 
       - name: Deployment Summary
+        if: steps.check.outputs.skip != 'true'
         run: |
           echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
           echo "- **Branch**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
