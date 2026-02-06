@@ -5,7 +5,7 @@
 FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci
+RUN npm install
 COPY . .
 
 FROM node:20-alpine
@@ -15,7 +15,7 @@ RUN addgroup -g 1001 appgroup && \
     adduser -u 1001 -G appgroup -s /bin/sh -D appuser
 
 COPY package*.json ./
-RUN npm ci --production && npm cache clean --force
+RUN npm install --omit=dev && npm cache clean --force
 COPY --from=builder /app/src ./src
 
 USER appuser

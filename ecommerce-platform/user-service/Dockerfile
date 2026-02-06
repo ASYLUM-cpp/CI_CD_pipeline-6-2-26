@@ -10,7 +10,7 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci
+RUN npm install
 
 COPY . .
 
@@ -25,7 +25,7 @@ RUN addgroup -g 1001 appgroup && \
 
 # Copy only production dependencies
 COPY package*.json ./
-RUN npm ci --production && npm cache clean --force
+RUN npm install --omit=dev && npm cache clean --force
 
 # Copy application source
 COPY --from=builder /app/src ./src
