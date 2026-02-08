@@ -10,7 +10,8 @@ FROM python:3.11-slim AS builder
 WORKDIR /app
 
 # Install system deps for psycopg2
-RUN apt-get update && apt-get install -y --no-install-recommends gcc libpq-dev && \
+RUN apt-get update && apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends gcc libpq-dev && \
     rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -22,7 +23,8 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install runtime dependency for PostgreSQL
-RUN apt-get update && apt-get install -y --no-install-recommends libpq5 curl && \
+RUN apt-get update && apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends libpq5 curl && \
     rm -rf /var/lib/apt/lists/*
 
 # Create non-root user

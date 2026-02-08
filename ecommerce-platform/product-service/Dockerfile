@@ -3,12 +3,14 @@
 # ============================================================
 
 FROM node:20-alpine AS builder
+RUN apk upgrade --no-cache
 WORKDIR /app
 COPY package*.json ./
 RUN npm install
 COPY . .
 
 FROM node:20-alpine
+RUN apk upgrade --no-cache
 WORKDIR /app
 
 RUN addgroup -g 1001 appgroup && \
