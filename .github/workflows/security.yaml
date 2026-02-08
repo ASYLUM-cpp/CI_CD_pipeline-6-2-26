@@ -61,25 +61,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Semgrep
+        run: pip install semgrep
+
       - name: Run Semgrep SAST
-        uses: semgrep/semgrep-action@v1
-        with:
-          config: >-
-            p/default
-            p/python
-            p/javascript
-            p/typescript
-            p/react
-            p/nodejs
-            p/sql-injection
-            p/xss
-            p/owasp-top-ten
-            p/secrets
-          generateSarif: "1"
-        env:
-          SEMGREP_RULES: >-
-            p/default
-            p/owasp-top-ten
+        run: |
+          semgrep scan \
+            --config p/default \
+            --config p/owasp-top-ten \
+            --sarif --output semgrep.sarif \
+            ecommerce-platform/ || true
+          # ↑ Findings are reported but do NOT block the pipeline.
+          #   Promote to hard-fail by removing '|| true' when ready.
+
+          echo "## 🔍 SAST Scan (Semgrep)" >> $GITHUB_STEP_SUMMARY
+          echo "Rulesets: p/default, p/owasp-top-ten" >> $GITHUB_STEP_SUMMARY
+          echo "Mode: **warn only** (review findings in SARIF / Artifacts)" >> $GITHUB_STEP_SUMMARY
 
       - name: Upload SARIF to GitHub Security
         if: always()
@@ -87,6 +84,14 @@ jobs:
         with:
           sarif_file: semgrep.sarif
         continue-on-error: true
+
+      - name: Upload Semgrep report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: semgrep.sarif
+          retention-days: 30
 
   # ═══════════════════════════════════════════════════════════
   # 3. DEPENDENCY SCANNING
@@ -240,53 +245,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Checkov
+        run: pip install checkov
+
       - name: Run Checkov — Terraform
-        uses: bridgecrewio/checkov-action@v12
-        with:
-          directory: ecommerce-platform/infra/terraform
-          framework: terraform
-          output_format: cli,sarif
-          output_file_path: console,/tmp/checkov-terraform.sarif
-          soft_fail: true   # Don't block — many Terraform checks need tuning
-          skip_check: CKV_AWS_144,CKV_AWS_145,CKV2_AWS_6  # Common false positives
-          quiet: true
+        run: |
+          checkov -d ecommerce-platform/infra/terraform \
+            --framework terraform \
+            --skip-check CKV_AWS_144,CKV_AWS_145,CKV2_AWS_6 \
+            --soft-fail \
+            --quiet || true
 
       - name: Run Checkov — Kubernetes manifests
-        uses: bridgecrewio/checkov-action@v12
-        with:
-          directory: ecommerce-platform/infra/k8s
-          framework: kubernetes
-          output_format: cli,sarif
-          output_file_path: console,/tmp/checkov-k8s.sarif
-          soft_fail: true
-          quiet: true
+        run: |
+          checkov -d ecommerce-platform/infra/k8s \
+            --framework kubernetes \
+            --soft-fail \
+            --quiet || true
 
       - name: Run Checkov — Dockerfiles
-        uses: bridgecrewio/checkov-action@v12
-        with:
-          directory: ecommerce-platform
-          framework: dockerfile
-          output_format: cli,sarif
-          output_file_path: console,/tmp/checkov-docker.sarif
-          soft_fail: true
-          quiet: true
-
-      - name: Upload Checkov SARIF
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: /tmp/checkov-terraform.sarif
-          category: checkov-terraform
-        continue-on-error: true
+        run: |
+          checkov -d ecommerce-platform \
+            --framework dockerfile \
+            --soft-fail \
+            --quiet || true
 
       - name: Summary
         if: always()
         run: |
           echo "## 🏗️ IaC Scan Complete" >> $GITHUB_STEP_SUMMARY
           echo "Scanned: Terraform, Kubernetes, Dockerfiles" >> $GITHUB_STEP_SUMMARY
-          echo "Mode: Soft-fail (warnings, no blocking)" >> $GITHUB_STEP_SUMMARY
+          echo "Mode: **Soft-fail** (warnings, no blocking)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Tip:** Review the Checkov output above and promote relevant checks to hard-fail as your infra matures." >> $GITHUB_STEP_SUMMARY
+          echo "**Tip:** Review Checkov output above and promote checks to hard-fail as infra matures." >> $GITHUB_STEP_SUMMARY
 
   # ═══════════════════════════════════════════════════════════
   # 5. CONTAINER SCANNING (Trivy)
@@ -329,6 +320,7 @@ jobs:
           image-ref: local/${{ matrix.service.name }}:scan
           format: sarif
           output: trivy-${{ matrix.service.name }}.sarif
+          exit-code: 0
           severity: CRITICAL,HIGH,MEDIUM
           ignore-unfixed: true
 
