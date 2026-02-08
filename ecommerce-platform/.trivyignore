@@ -1,0 +1,8 @@
+# Trivy Ignore File
+# List CVE IDs to suppress (one per line).
+# Only add CVEs after risk assessment — document the reason.
+# Docs: https://aquasecurity.github.io/trivy/latest/docs/configuration/filtering/
+
+# ── Example (uncomment when needed) ──
+# CVE-2023-XXXXX  # No fix available, mitigated by network policy
+# CVE-2024-XXXXX  # False positive — function not reachable in our code

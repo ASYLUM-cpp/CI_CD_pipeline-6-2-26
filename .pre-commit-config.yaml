@@ -1,0 +1,48 @@
+# Pre-commit hooks — run security checks before code leaves your machine.
+# Install: pip install pre-commit && pre-commit install
+# Manual run: pre-commit run --all-files
+
+repos:
+  # ─── Secret Detection (Gitleaks) ───
+  # Scans staged files for leaked API keys, passwords, tokens, etc.
+  # This is the FIRST line of defense — blocks commits with secrets.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.1
+    hooks:
+      - id: gitleaks
+
+  # ─── Python Linting ───
+  - repo: https://github.com/PyCQA/flake8
+    rev: 7.0.0
+    hooks:
+      - id: flake8
+        args: ['--max-line-length=120', '--ignore=E501']
+        files: \.(py)$
+
+  # ─── YAML Lint ───
+  # Catches syntax errors in GitHub Actions, K8s manifests, Docker Compose
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.33.0
+    hooks:
+      - id: yamllint
+        args: ['-d', '{extends: relaxed, rules: {line-length: {max: 200}}}']
+
+  # ─── Dockerfile Lint (Hadolint) ───
+  # Best practices for Dockerfiles (run as non-root, pin versions, etc.)
+  - repo: https://github.com/hadolint/hadolint
+    rev: v2.12.1-beta
+    hooks:
+      - id: hadolint-docker
+
+  # ─── Trailing whitespace, EOF fixes ───
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: ['--allow-multiple-documents']
+      - id: check-json
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: detect-private-key

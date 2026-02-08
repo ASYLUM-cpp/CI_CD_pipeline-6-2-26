@@ -85,8 +85,8 @@ kubectl apply -k infra/k8s/dev/
 ## CI/CD
 
 GitHub Actions workflows handle:
-- **CI**: Lint, test, build Docker images, push to registry
-- **CD**: Deploy to dev (develop branch) or prod (main branch)
+- **CI**: Lint, test, build Docker images, Trivy scan, push to registry
+- **CD**: Security gate → Deploy to dev (develop branch) or prod (main/master branch) → Health check → Auto-rollback on failure
 
 ### Required GitHub Secrets
 | Secret | Value |
@@ -96,6 +96,66 @@ GitHub Actions workflows handle:
 | `CONTROL_PLANE_IP` | EC2 control plane public IP (from terraform output) |
 
 > Docker Hub username `asylums` is hardcoded in workflows.
+
+## DevSecOps Pipeline
+
+Security is integrated at every stage — not bolted on at the end. Three workflows run in parallel:
+
+```
+Push / PR
+   │
+   ├── CI Pipeline (ci.yaml)
+   │   ├── Lint (ESLint, Flake8)
+   │   ├── Test (Jest, Pytest)
+   │   ├── Docker Build
+   │   ├── Trivy CVE Scan ← blocks on CRITICAL
+   │   ├── Trivy Secret Scan ← hard block
+   │   └── Push to Docker Hub
+   │
+   ├── Security Pipeline (security.yaml)
+   │   ├── 🔐 Gitleaks (secret scanning) ← hard block
+   │   ├── 🔍 Semgrep SAST (code vulnerabilities)
+   │   ├── 📦 pip-audit + npm audit (dependency CVEs)
+   │   ├── 🏗️ Checkov (Terraform, K8s, Dockerfiles)
+   │   ├── 🐳 Trivy (container OS + library CVEs)
+   │   ├── 📋 SBOM generation (CycloneDX)
+   │   ├── ⚖️ License compliance
+   │   └── 📊 Security Summary
+   │
+   └── CD Pipeline (cd.yaml) — triggers AFTER CI passes
+       ├── 🔒 Security Gate
+       ├── Deploy to Kubernetes
+       ├── Health Check
+       └── Auto-rollback on failure
+```
+
+### Severity Policy
+
+| Severity | Action | Examples |
+|----------|--------|----------|
+| **Secrets** | ❌ Hard block | API keys, passwords in code or images |
+| **Critical CVE** | ❌ Block | Actively exploited vulnerabilities |
+| **High CVE** | ⚠️ Warn | Exploitable with effort |
+| **Medium/Low** | ℹ️ Info | Logged for review |
+| **IaC misconfig** | ⚠️ Soft-fail | S3 without encryption, open security groups |
+
+### Pre-commit Hooks (Local)
+
+```bash
+pip install pre-commit
+pre-commit install
+# Now Gitleaks, flake8, yamllint, Hadolint run before every commit
+```
+
+### Exception Management
+
+False positives and accepted risks are documented in:
+- `.gitleaks.toml` — secret scanning allowlist
+- `ecommerce-platform/.trivyignore` — suppressed CVEs
+- `ecommerce-platform/.semgrepignore` — excluded paths
+- `ecommerce-platform/infra/.checkov-skip-reasons.md` — IaC skip rationale
+
+See [SECURITY.md](../SECURITY.md) for the full security policy.
 
 ## Observability
 

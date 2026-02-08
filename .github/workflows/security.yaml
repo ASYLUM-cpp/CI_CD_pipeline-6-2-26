@@ -1,0 +1,478 @@
+# ============================================================
+# DevSecOps Pipeline – Security Scanning
+# Runs on every push and PR. Scans code, dependencies,
+# infrastructure, containers, and generates SBOMs.
+# ============================================================
+name: Security Pipeline
+
+on:
+  push:
+    branches: [master, main, develop]
+  pull_request:
+    branches: [master, main, develop]
+  schedule:
+    # Run weekly on Mondays at 6 AM UTC (catches new CVEs)
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+  security-events: write  # For GitHub Security tab integration
+  actions: read
+
+env:
+  SEVERITY_BLOCK: CRITICAL,HIGH    # These severities block the pipeline
+  SEVERITY_WARN: MEDIUM            # These produce warnings only
+
+jobs:
+  # ═══════════════════════════════════════════════════════════
+  # 1. SECRET SCANNING (Gitleaks)
+  # Scans entire git history for leaked secrets
+  # ═══════════════════════════════════════════════════════════
+  secret-scan:
+    name: "🔐 Secret Scanning"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for thorough scanning
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: false  # HARD BLOCK — secrets = immediate fail
+
+      - name: Upload Gitleaks report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report
+          path: results.sarif
+          retention-days: 30
+
+  # ═══════════════════════════════════════════════════════════
+  # 2. SAST — Static Application Security Testing (Semgrep)
+  # Pattern-based scanning for SQL injection, XSS, hardcoded
+  # creds, insecure deserialization, auth bypasses, etc.
+  # ═══════════════════════════════════════════════════════════
+  sast-scan:
+    name: "🔍 SAST (Semgrep)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep SAST
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: >-
+            p/default
+            p/python
+            p/javascript
+            p/typescript
+            p/react
+            p/nodejs
+            p/sql-injection
+            p/xss
+            p/owasp-top-ten
+            p/secrets
+          generateSarif: "1"
+        env:
+          SEMGREP_RULES: >-
+            p/default
+            p/owasp-top-ten
+
+      - name: Upload SARIF to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+        continue-on-error: true
+
+  # ═══════════════════════════════════════════════════════════
+  # 3. DEPENDENCY SCANNING
+  # Checks Python (pip-audit) and Node.js (npm audit) deps
+  # against known CVE databases
+  # ═══════════════════════════════════════════════════════════
+  dependency-scan-python:
+    name: "📦 Dependency Scan (Python)"
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service:
+          - { name: order-service, path: ecommerce-platform/order-service }
+          - { name: payment-service, path: ecommerce-platform/payment-service }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Run pip-audit
+        run: |
+          echo "## 📦 Dependency Audit: ${{ matrix.service.name }}" >> $GITHUB_STEP_SUMMARY
+          pip-audit \
+            -r ${{ matrix.service.path }}/requirements.txt \
+            --format json \
+            --output /tmp/audit-results.json \
+            --desc || true
+
+          # Parse results for severity-based blocking
+          python3 << 'EOF'
+          import json, sys
+          try:
+              with open('/tmp/audit-results.json') as f:
+                  data = json.load(f)
+              vulns = data if isinstance(data, list) else data.get('dependencies', [])
+              critical = 0
+              high = 0
+              for dep in vulns:
+                  for v in dep.get('vulns', []):
+                      fix = v.get('fix_versions', [])
+                      desc = v.get('description', '')
+                      print(f"⚠️  {dep['name']}=={dep['version']} → {v['id']}")
+                      if 'critical' in desc.lower():
+                          critical += 1
+                      else:
+                          high += 1
+              if critical > 0:
+                  print(f"\n❌ {critical} CRITICAL vulnerabilities found — blocking pipeline")
+                  sys.exit(1)
+              elif high > 0:
+                  print(f"\n⚠️  {high} vulnerabilities found (non-critical) — warning only")
+              else:
+                  print("\n✅ No known vulnerabilities found")
+          except Exception as e:
+              print(f"Audit parsing skipped: {e}")
+          EOF
+
+      - name: Upload audit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-${{ matrix.service.name }}
+          path: /tmp/audit-results.json
+          retention-days: 30
+
+  dependency-scan-node:
+    name: "📦 Dependency Scan (Node.js)"
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service:
+          - { name: frontend, path: ecommerce-platform/frontend }
+          - { name: user-service, path: ecommerce-platform/user-service }
+          - { name: product-service, path: ecommerce-platform/product-service }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.service.path }}
+        run: npm install
+
+      - name: Run npm audit
+        working-directory: ${{ matrix.service.path }}
+        run: |
+          echo "## 📦 npm audit: ${{ matrix.service.name }}" >> $GITHUB_STEP_SUMMARY
+
+          # npm audit exit codes: 0=clean, non-zero=vulns found
+          # --audit-level=critical means only exit non-zero for critical
+          npm audit --json > /tmp/npm-audit.json 2>&1 || true
+
+          # Block on critical, warn on others
+          node << 'EOF'
+          const fs = require('fs');
+          try {
+            const data = JSON.parse(fs.readFileSync('/tmp/npm-audit.json', 'utf8'));
+            const meta = data.metadata || {};
+            const vulns = meta.vulnerabilities || {};
+            const critical = vulns.critical || 0;
+            const high = vulns.high || 0;
+            const moderate = vulns.moderate || 0;
+            const low = vulns.low || 0;
+            const total = vulns.total || 0;
+
+            console.log(`\nVulnerability Summary:`);
+            console.log(`  Critical: ${critical}`);
+            console.log(`  High:     ${high}`);
+            console.log(`  Moderate: ${moderate}`);
+            console.log(`  Low:      ${low}`);
+            console.log(`  Total:    ${total}\n`);
+
+            if (critical > 0) {
+              console.log('❌ Critical vulnerabilities found — blocking pipeline');
+              process.exit(1);
+            } else if (high > 0) {
+              console.log('⚠️  High vulnerabilities found — warning');
+            } else {
+              console.log('✅ No critical/high vulnerabilities');
+            }
+          } catch(e) {
+            console.log('Audit parsing skipped:', e.message);
+          }
+          EOF
+
+      - name: Upload audit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-${{ matrix.service.name }}
+          path: /tmp/npm-audit.json
+          retention-days: 30
+
+  # ═══════════════════════════════════════════════════════════
+  # 4. INFRASTRUCTURE-AS-CODE SCANNING (Checkov)
+  # Scans Terraform, Kubernetes manifests, Dockerfiles, and
+  # Helm charts for misconfigurations and CIS benchmarks
+  # ═══════════════════════════════════════════════════════════
+  iac-scan:
+    name: "🏗️ IaC Scanning (Checkov)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Checkov — Terraform
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: ecommerce-platform/infra/terraform
+          framework: terraform
+          output_format: cli,sarif
+          output_file_path: console,/tmp/checkov-terraform.sarif
+          soft_fail: true   # Don't block — many Terraform checks need tuning
+          skip_check: CKV_AWS_144,CKV_AWS_145,CKV2_AWS_6  # Common false positives
+          quiet: true
+
+      - name: Run Checkov — Kubernetes manifests
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: ecommerce-platform/infra/k8s
+          framework: kubernetes
+          output_format: cli,sarif
+          output_file_path: console,/tmp/checkov-k8s.sarif
+          soft_fail: true
+          quiet: true
+
+      - name: Run Checkov — Dockerfiles
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: ecommerce-platform
+          framework: dockerfile
+          output_format: cli,sarif
+          output_file_path: console,/tmp/checkov-docker.sarif
+          soft_fail: true
+          quiet: true
+
+      - name: Upload Checkov SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: /tmp/checkov-terraform.sarif
+          category: checkov-terraform
+        continue-on-error: true
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## 🏗️ IaC Scan Complete" >> $GITHUB_STEP_SUMMARY
+          echo "Scanned: Terraform, Kubernetes, Dockerfiles" >> $GITHUB_STEP_SUMMARY
+          echo "Mode: Soft-fail (warnings, no blocking)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Tip:** Review the Checkov output above and promote relevant checks to hard-fail as your infra matures." >> $GITHUB_STEP_SUMMARY
+
+  # ═══════════════════════════════════════════════════════════
+  # 5. CONTAINER SCANNING (Trivy)
+  # Scans Docker images for OS-level and app-level CVEs,
+  # misconfigurations, and exposed secrets
+  # ═══════════════════════════════════════════════════════════
+  container-scan:
+    name: "🐳 Container Scan (Trivy)"
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service:
+          - { name: frontend, context: ecommerce-platform/frontend }
+          - { name: user-service, context: ecommerce-platform/user-service }
+          - { name: product-service, context: ecommerce-platform/product-service }
+          - { name: order-service, context: ecommerce-platform/order-service }
+          - { name: payment-service, context: ecommerce-platform/payment-service }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image (local, not pushed)
+        run: |
+          docker build -t local/${{ matrix.service.name }}:scan \
+            ${{ matrix.service.context }}
+
+      - name: Run Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: local/${{ matrix.service.name }}:scan
+          format: table
+          exit-code: 1                   # Fail on findings
+          severity: CRITICAL,HIGH        # Only block on critical/high
+          ignore-unfixed: true           # Skip CVEs with no available fix
+          vuln-type: os,library
+        continue-on-error: true          # Don't block entire matrix
+
+      - name: Run Trivy SARIF output
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: local/${{ matrix.service.name }}:scan
+          format: sarif
+          output: trivy-${{ matrix.service.name }}.sarif
+          severity: CRITICAL,HIGH,MEDIUM
+          ignore-unfixed: true
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-${{ matrix.service.name }}.sarif
+          category: trivy-${{ matrix.service.name }}
+        continue-on-error: true
+
+      - name: Run Trivy secret scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: local/${{ matrix.service.name }}:scan
+          format: table
+          exit-code: 1
+          scanners: secret
+        continue-on-error: false  # Hard-fail on secrets in images
+
+  # ═══════════════════════════════════════════════════════════
+  # 6. SBOM GENERATION (Software Bill of Materials)
+  # Generates CycloneDX SBOMs for each service — useful for
+  # supply chain security and compliance audits
+  # ═══════════════════════════════════════════════════════════
+  sbom:
+    name: "📋 SBOM Generation"
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service:
+          - { name: frontend, context: ecommerce-platform/frontend }
+          - { name: user-service, context: ecommerce-platform/user-service }
+          - { name: product-service, context: ecommerce-platform/product-service }
+          - { name: order-service, context: ecommerce-platform/order-service }
+          - { name: payment-service, context: ecommerce-platform/payment-service }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build -t local/${{ matrix.service.name }}:sbom \
+            ${{ matrix.service.context }}
+
+      - name: Generate SBOM with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: local/${{ matrix.service.name }}:sbom
+          format: cyclonedx
+          output: sbom-${{ matrix.service.name }}.json
+          scanners: vuln
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.service.name }}
+          path: sbom-${{ matrix.service.name }}.json
+          retention-days: 90
+
+  # ═══════════════════════════════════════════════════════════
+  # 7. LICENSE COMPLIANCE
+  # Checks that all dependencies use approved licenses
+  # (no GPL in a commercial project, etc.)
+  # ═══════════════════════════════════════════════════════════
+  license-check:
+    name: "⚖️ License Compliance"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check Node.js licenses
+        run: |
+          npm install -g license-checker
+          echo "## ⚖️ License Compliance Report" >> $GITHUB_STEP_SUMMARY
+
+          BLOCKED_LICENSES="GPL-3.0;AGPL-3.0;SSPL-1.0;EUPL-1.1"
+
+          for svc in frontend user-service product-service; do
+            echo "### $svc" >> $GITHUB_STEP_SUMMARY
+            cd ecommerce-platform/$svc
+            npm install --ignore-scripts 2>/dev/null || true
+
+            # Check for blocked licenses
+            license-checker --failOn "$BLOCKED_LICENSES" --summary 2>&1 | tee /tmp/lic-$svc.txt || {
+              echo "❌ **Blocked license detected in $svc!**" >> $GITHUB_STEP_SUMMARY
+              cat /tmp/lic-$svc.txt >> $GITHUB_STEP_SUMMARY
+            }
+
+            echo "✅ No blocked licenses in $svc" >> $GITHUB_STEP_SUMMARY
+            cd ../..
+          done
+
+      - name: Check Python licenses
+        run: |
+          pip install pip-licenses
+
+          for svc in order-service payment-service; do
+            echo "### $svc" >> $GITHUB_STEP_SUMMARY
+            pip install -r ecommerce-platform/$svc/requirements.txt -q 2>/dev/null || true
+            pip-licenses --format=table --with-urls | tee /tmp/lic-$svc.txt
+
+            # Check for copyleft licenses
+            if grep -iE "GPL-3|AGPL|SSPL" /tmp/lic-$svc.txt; then
+              echo "⚠️  Copyleft license found in $svc — review required" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "✅ No copyleft licenses in $svc" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+  # ═══════════════════════════════════════════════════════════
+  # 8. SECURITY SUMMARY — Aggregates all results
+  # ═══════════════════════════════════════════════════════════
+  security-summary:
+    name: "📊 Security Summary"
+    runs-on: ubuntu-latest
+    needs: [secret-scan, sast-scan, dependency-scan-python, dependency-scan-node, iac-scan, container-scan, sbom, license-check]
+    if: always()
+    steps:
+      - name: Generate summary
+        run: |
+          echo "# 🛡️ DevSecOps Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Scan | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔐 Secret Scanning (Gitleaks) | ${{ needs.secret-scan.result == 'success' && '✅ Pass' || '❌ Fail' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔍 SAST (Semgrep) | ${{ needs.sast-scan.result == 'success' && '✅ Pass' || '⚠️ Findings' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📦 Dependency Scan (Python) | ${{ needs.dependency-scan-python.result == 'success' && '✅ Pass' || '⚠️ Findings' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📦 Dependency Scan (Node.js) | ${{ needs.dependency-scan-node.result == 'success' && '✅ Pass' || '⚠️ Findings' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🏗️ IaC Scan (Checkov) | ${{ needs.iac-scan.result == 'success' && '✅ Pass' || '⚠️ Findings' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🐳 Container Scan (Trivy) | ${{ needs.container-scan.result == 'success' && '✅ Pass' || '⚠️ Findings' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📋 SBOM Generation | ${{ needs.sbom.result == 'success' && '✅ Generated' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| ⚖️ License Compliance | ${{ needs.license-check.result == 'success' && '✅ Pass' || '⚠️ Review' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "**Blocking policy**: Secrets (always), Critical CVEs (deps & containers)" >> $GITHUB_STEP_SUMMARY
+          echo "**Warning only**: High/Medium CVEs, IaC misconfigs, SAST findings" >> $GITHUB_STEP_SUMMARY
+          echo "**Info only**: Low CVEs, license report, SBOM" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,13 @@
+# Semgrep Ignore Paths
+# Files/dirs listed here are excluded from SAST scanning.
+# Only exclude generated code or vendored dependencies.
+
+node_modules/
+.terraform/
+__pycache__/
+*.min.js
+build/
+dist/
+coverage/
+*.test.js
+*.test.py
