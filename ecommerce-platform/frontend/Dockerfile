@@ -5,8 +5,8 @@
 # ============================================================
 
 # ---- Build Stage ----
-FROM node:17-alpine AS builder
-# RUN apk upgrade --no-cache
+FROM node:20-alpine AS builder
+RUN apk upgrade --no-cache
 
 WORKDIR /app
 
@@ -19,8 +19,8 @@ COPY . .
 RUN npm run build
 
 # ---- Production Stage ----
-FROM nginx:1.23-alpine
-# RUN apk upgrade --no-cache
+FROM nginx:1.27-alpine
+RUN apk upgrade --no-cache
 
 # Copy custom NGINX config
 COPY --from=builder /app/build /usr/share/nginx/html
